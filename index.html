@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Продажа SFC — Sementsul Famaly Coin</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#0b0c10; color:#c5c6c7; margin:0; padding:20px; }
+  .container { max-width: 640px; margin: 0 auto; }
+  h1 { color:#66fcf1; margin: 0 0 8px 0; font-size: 22px; }
+  .card { background:#1f2833; border:1px solid #45a29e; border-radius:12px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:#66fcf1; margin-bottom:6px; }
+  input { width:100%; padding:10px; border-radius:6px; border:1px solid #45a29e; background:#0b0c10; color:#fff; font-size:16px; margin-bottom:12px; font-family: inherit; }
+  button { width:100%; padding:12px; border-radius:6px; border:none; background:#66fcf1; color:#0b0c10; font-weight:bold; font-size:16px; cursor:pointer; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  .row { display:flex; gap:10px; margin-bottom:12px; }
+  .row > div { flex:1; }
+  #status { min-height:24px; color:#ff6b6b; font-size:14px; margin-bottom:12px; }
+  .connected { color:#66fcf1; font-weight:bold; }
+  .hidden { display:none; }
+  .small { font-size:12px; color:#888; margin-top:4px; }
+  .addr-input { width:100%; padding:10px; border-radius:6px; border:1px solid #45a29e; background:#0b0c10; color:#fff; font-family:monospace; font-size:13px; margin-bottom:12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>SFC — Sementsul Famaly Coin</h1>
+
+  <div id="walletSection" class="card">
+    <label>Кошелек</label>
+    <button id="connectBtn">Подключить MetaMask</button>
+    <div id="accountInfo" class="connected hidden"></div>
+    <div id="networkInfo" class="small hidden"></div>
+    <div id="switchNet" style="cursor:pointer; color:#66fcf1; margin-top:8px; display:none;">Переключить сеть на BNB Chain</div>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="card">
+      <label>Адрес контракта SFC</label>
+      <input type="text" id="contractAddr" placeholder="Вставьте адрес контракта" class="addr-input" value="0xE6B5275d5b9e194414B76e6882Cd0Ea49fC353E6">
+    </div>
+
+    <div class="card">
+      <label>Купить SFC (количество монет)</label>
+      <input type="number" id="buyAmount" placeholder="Например 10" step="any" min="0">
+      <div class="small">Минимум: 7 USDT. Цена за 1 SFC: <span id="priceUI">загрузка...</span> USDT</div>
+      <button id="buyBtn">Купить SFC</button>
+    </div>
+
+    <div class="card">
+      <label>Шаг 1. Разрешить контракту списать USDT (Approve)</label>
+      <input type="number" id="approveAmount" placeholder="Сумма USDT" step="any" min="0">
+      <div class="small">Нужно сделать один раз перед первой покупкой.</div>
+      <button id="approveBtn">Approve USDT</button>
+    </div>
+
+    <div class="card">
+      <label>Ваш баланс</label>
+      <div class="row">
+        <div><div style="font-size:12px;color:#888">SFC</div><div id="sfcBalance">0</div></div>
+        <div><div style="font-size:12px;color:#888">USDT</div><div id="usdtBalance">0</div></div>
+      </div>
+    </div>
+
+    <div id="status"></div>
+  </div>
+</div>
+
+<script type="module">
+import { ethers } from 'https://esm.sh/ethers@6.13.4';
+
+const USDT_ADDRESS_BSC = '0x55d398326f99059ff775485246999027b3197955';
+const BSC_CHAIN_ID = '0x38';
+const BSC_RPC = 'https://bsc-dataseed.binance.org/';
+
+const SALE_ABI = [
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function usdt() view returns (address)",
+  "function owner() view returns (address)",
+  "function usdtPerToken() view returns (uint256)",
+  "function MIN_PURCHASE_USDT() view returns (uint256)",
+  "function balanceOfToken(address user) view returns (uint256)",
+  "function approveUSDT(uint256 amount)",
+  "function buy(uint256 tokenAmount)",
+  "event Purchased(address indexed buyer, uint256 usdtAmount, uint256 tokenAmount)"
+];
+
+const USDT_ABI = [
+  "function balanceOf(address account) view returns (uint256)"
+];
+
+let provider, signer, saleContract, usdtContract, userAddress;
+let contractAddress = '';
+
+function formatUnits(value, decimals = 18) {
+  if (!value) return '0';
+  return ethers.formatUnits(value, decimals);
+}
+function parseUnits(value, decimals = 18) {
+  return ethers.parseUnits(value.toString(), decimals);
+}
+
+async function initWeb3() {
+  if (!window.ethereum) {
+    alert('MetaMask не найден. Установите расширение.');
+    return false;
+  }
+  provider = new ethers.BrowserProvider(window.ethereum);
+
+  try {
+    await switchToBSC();
+    signer = await provider.getSigner();
+    userAddress = await signer.getAddress();
+
+    document.getElementById('accountInfo').textContent = userAddress;
+    document.getElementById('accountInfo').classList.remove('hidden');
+
+    const network = await provider.getNetwork();
+    document.getElementById('networkInfo').textContent = `Сеть: ${network.name} (${network.chainId})`;
+    document.getElementById('networkInfo').classList.remove('hidden');
+
+    document.getElementById('connectBtn').style.display = 'none';
+    document.getElementById('app').classList.remove('hidden');
+
+    const saved = localStorage.getItem('sfc_contract_address');
+    if (saved) {
+      document.getElementById('contractAddr').value = saved;
+      contractAddress = saved;
+      initContracts(contractAddress);
+    }
+    return true;
+  } catch (e) {
+    document.getElementById('status').textContent = 'Ошибка подключения: ' + e.message;
+    return false;
+  }
+}
+
+async function switchToBSC() {
+  try {
+    await window.ethereum.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: BSC_CHAIN_ID }],
+    });
+  } catch (switchError) {
+    if (switchError.code === 4902) {
+      await window.ethereum.request({
+        method: 'wallet_addEthereumChain',
+        params: [{
+          chainId: BSC_CHAIN_ID,
+          chainName: 'BNB Chain',
+          nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
+          rpcUrls: [BSC_RPC],
+          blockExplorerUrls: ['https://bscscan.com'],
+        }],
+      });
+    } else {
+      throw switchError;
+    }
+  }
+}
+
+function initContracts(addr) {
+  contractAddress = addr;
+  localStorage.setItem('sfc_contract_address', addr);
+  saleContract = new ethers.Contract(addr, SALE_ABI, signer);
+  usdtContract = new ethers.Contract(USDT_ADDRESS_BSC, USDT_ABI, provider);
+
+  saleContract.usdtPerToken().then(p => {
+    document.getElementById('priceUI').textContent = formatUnits(p, 18);
+  }).catch(() => {});
+
+  updateBalances();
+
+  saleContract.on('Purchased', (buyer, usdtAmt, tokenAmt) => {
+    if (buyer.toLowerCase() === userAddress.toLowerCase()) {
+      document.getElementById('status').textContent = '✅ Покупка успешна! ' + formatUnits(tokenAmt, 18) + ' SFC на ваш кошелёк.';
+      updateBalances();
+    }
+  });
+}
+
+async function updateBalances() {
+  if (!userAddress || !saleContract) return;
+  try {
+    const sfcBal = await saleContract.balanceOfToken(userAddress);
+    document.getElementById('sfcBalance').textContent = formatUnits(sfcBal, 18) + ' SFC';
+  } catch(e) {}
+  try {
+    const usdtBal = await usdtContract.balanceOf(userAddress);
+    document.getElementById('usdtBalance').textContent = formatUnits(usdtBal, 18) + ' USDT';
+  } catch(e) {}
+}
+
+document.getElementById('connectBtn').addEventListener('click', initWeb3);
+
+document.getElementById('contractAddr').addEventListener('change', (e) => {
+  const val = e.target.value.trim();
+  if (val.startsWith('0x') && val.length === 42) {
+    initContracts(val);
+  } else {
+    document.getElementById('status').textContent = 'Введите корректный адрес контракта';
+  }
+});
+
+document.getElementById('approveBtn').addEventListener('click', async () => {
+  const amt = document.getElementById('approveAmount').value;
+  if (!amt || parseFloat(amt) <= 0) {
+    document.getElementById('status').textContent = 'Введите сумму USDT';
+    return;
+  }
+  document.getElementById('status').textContent = 'Подтвердите транзакцию в MetaMask...';
+  try {
+    const wei = parseUnits(amt, 18);
+    const tx = await saleContract.approveUSDT(wei);
+    await tx.wait();
+    document.getElementById('status').textContent = '✅ Approve выполнен. Теперь можно покупать.';
+    updateBalances();
+  } catch (e) {
+    document.getElementById('status').textContent = 'Ошибка Approve: ' + e.message;
+    console.error(e);
+  }
+});
+
+document.getElementById('buyBtn').addEventListener('click', async () => {
+  const amt = document.getElementById('buyAmount').value;
+  if (!amt || parseFloat(amt) <= 0) {
+    document.getElementById('status').textContent = 'Введите количество SFC';
+    return;
+  }
+  document.getElementById('status').textContent = 'Подтвердите покупку в MetaMask...';
+  try {
+    const tokenWei = parseUnits(amt, 18);
+    const tx = await saleContract.buy(tokenWei);
+    await tx.wait();
+    document.getElementById('status').textContent = '✅ Куплено ' + amt + ' SFC!';
+    document.getElementById('buyAmount').value = '';
+    updateBalances();
+  } catch (e) {
+    document.getElementById('status').textContent = 'Ошибка покупки: ' + e.message;
+    console.error(e);
+  }
+});
+
+window.ethereum?.on('accountsChanged', () => location.reload());
+window.ethereum?.on('chainChanged', () => location.reload());
+</script>
+</body>
+</html>
